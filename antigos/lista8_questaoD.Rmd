@@ -1,0 +1,270 @@
+---
+title: "moran"
+author: "Antonio Oss Boll"
+date: "2023-04-13"
+output: html_document
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(sf)
+library(dplyr)
+library(plotly)
+library(leaflet)
+library(sp)
+library(spdep)
+library(kableExtra)
+```
+
+                                   
+# Essa lista pode ser feita em grupos de ATÉ 7 pessoas. {-}
+
+## O alun@ ou grupo deverá apresentar o código da anáise no dia 14 de abril. 50% da nota é o código (crie uma pasta no github) e 50% da nota é a apresentação (15 minutos) {-}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	error = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+```{r, results='hide'}
+# Dados iniciais
+homicidios <- read.csv2("bancos iniciais/homicidios.csv", 
+                        encoding = "UTF-8") %>% 
+  filter(periodo == 2019) %>% select(1, 2, "num" = valor)
+taxa <- read.csv2("bancos iniciais/taxa-homicidios.csv", 
+                  encoding = "UTF-8") %>% 
+  filter(periodo == 2019) %>%  select(1, 2, "taxa" = valor)
+codigos_ibge <- read.csv2("bancos iniciais/codigos_ibge.csv", 
+                          encoding = "UTF-8") %>%
+  mutate("cod" = codigo) %>% select(-codigo)
+populacao <- read_xlsx("bancos iniciais/populacao_rs2019.xlsx")
+
+valores <- full_join(homicidios, taxa, by = c("cod", "nome")) %>%
+  filter(cod %in% codigos_ibge$cod) %>% unique() %>%
+  full_join(populacao, by = c("nome" = "municipio")) %>%
+  mutate(taxa = (num/populacao)*100000,
+         cod = as.character(cod)) %>%
+  mutate(cod = ifelse(nome == "Coronel Barros", "4305871", cod))
+
+shp <- st_read("shapefile/RS_Municipios_2019.shp") %>%
+  filter(CD_MUN %in% codigos_ibge$cod)
+
+dados <- left_join(shp, valores, by = c("CD_MUN" = "cod")) %>%
+  select(CD_MUN, NM_MUN, "homicidios" = num, taxa, populacao, geometry)
+
+pal <- colorBin("Reds", domain = dados$homicidios)
+```
+
+### c) Calcule o índice de moran para esses dados. {-}
+
+- Índice de Moran global
+
+```{r}
+dados$homicidios[is.na(dados$homicidios)] <- 0
+dados$prop_obitos <- dados$homicidios/dados$populacao
+
+## matriz de vizinhança - rainha ##
+w <- poly2nb(dados$geometry, row.names = dados$NM_MUN)
+ww <- nb2listw(w, style = 'B') #faz a matriz de pesos 0 ou 1
+
+## calculo do teste ##
+i_moran <- moran.mc(dados$prop_obitos, ww, nsim = 9999)
+i_moran
+
+ggplot(data.frame('indice' = i_moran[['res']]), aes(x = indice))+
+  geom_density(size = 1, fill = 'gray90')+
+  geom_vline(xintercept = i_moran$statistic, col = 'red')+
+  theme_minimal()
+#hist(i_moran[["res"]])
+```
+Observando o p-valor do teste, vejo que ele foi significativo, rejeitando a hipotese nula. Portanto, o indice de moran nao eh 0. Para a sua estimativa, seu valor eh 0.091348. Por ser um valor positivo, isso indica que ha a similaridade no comportamento de areas proximas e vizinhas. Alem disso, por ser um valor baixo, posso concluir que essa similaridade nao eh tao forte.
+
+- Índice de moran local
+
+```{r}
+valores_local_moran <- localmoran(dados$prop_obitos, ww)
+
+
+# valor do índice de moran local
+ggplot(data.frame(valores_local_moran))+
+  geom_histogram(aes(x = Ii), bins = 8, fill = rgb(.5,.7,.8,1))+
+  xlab('moran local')+ylab('frequência')+
+  theme_minimal()
+```
+
+Nesse grafico, observo que muitos valores possuem autocorrelacao espacial proximos de 0. 
+  
+Os que possuem uma autocorrelacao espacial maior que 0 possuem valores semelhantes aos seus vizinhos imediatos. 
+  
+Diferentemente, os que possuem uma autocorrelacao espacial menor que 0 possuem valores diferentes.
+
+```{r}
+# significância
+ggplot(data.frame(valores_local_moran))+
+  geom_histogram(aes(x = valores_local_moran[,5]), bins = 10, fill = rgb(1,.2,.4))+
+  geom_vline(xintercept = 0.05)+
+  xlab('p-valores')+ylab('frequência')+
+  theme_minimal()
+```
+
+Nesse grafico, observo o tamanho dos municipios que possuem um p valor significativo.
+
+```{r}
+
+data.frame(valores_local_moran) %>%
+  select(1,5) %>%
+  top_n(-10)
+
+
+mp <- moran.plot(dados$prop_obitos, ww, labels=as.character(dados$NM_MUN), pch=19)
+```
+
+Observando na tabela, vejo que os municipios que possuem um p valor significativo sao aqueles que possuem a autocorrelacao maior/menor que 0.
+
+No grafico de moran, vejo aqueles municipios que possuem um maior numero de vizinhos, ou seja, uma maior influencia.
+
+
+```{r}
+dados$valor_moran = valores_local_moran[,1] #valores do i de moran local
+dados$significancia_moran = valores_local_moran[,5] #significancia do i de moran local
+
+pal <- colorNumeric("RdYlBu", domain = dados$significancia_moran, reverse = TRUE)
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+      addPolygons(fillColor = ~pal(significancia_moran), 
+                  weight = 1.5,
+                  opacity = 0.7,
+                  fillOpacity = 0.7,
+                  color = "gray",
+                  highlight = highlightOptions(
+                    weight = 5,
+                    color = "#666",
+                    fillOpacity = 0.7,
+                    bringToFront = TRUE),
+                  label = sprintf("%s - p valores moran %s", dados$NM_MUN, round(dados$significancia_moran,3)),
+                  labelOptions = labelOptions(
+                    style = list("font-weight" = "normal", padding = "6px 11px"),
+                    textsize = "10px",
+                    direction = "auto")) %>%
+  addLegend(pal = pal, values = ~significancia_moran, opacity = 1,  
+            title = "p-valores Moran", position = 'bottomright')
+
+```
+
+Observando o grafico, vejo alguns p valores significativos.
+  
+Isso indica que algumas regioes possuem uma forte autocorrelacao, como por exemplo Nonoai.
+  
+Diferentemente de Serio, que possui um p-valor alto, indicando uma autocorrelacao muito baixa.
+  
+Serio possui 3 homicidios com uma populacao muito baixa, podendo ser considerado um outlier.
+
+
+```{r}
+pal <- colorNumeric("RdYlBu", domain = dados$valor_moran, reverse = TRUE)
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+      addPolygons(fillColor = ~pal(valor_moran), 
+                  weight = 1.5,
+                  opacity = 0.7,
+                  fillOpacity = 0.7,
+                  color = "gray",
+                  highlight = highlightOptions(
+                    weight = 5,
+                    color = "#666",
+                    fillOpacity = 0.7,
+                    bringToFront = TRUE),
+                  label = sprintf("%s - Moran local: %s", dados$NM_MUN, round(dados$valor_moran,3)),
+                  labelOptions = labelOptions(
+                    style = list("font-weight" = "normal", padding = "6px 11px"),
+                    textsize = "10px",
+                    direction = "auto")) %>%
+  addLegend(pal = pal, values = ~valor_moran, opacity = 1, title = 'Moran local',
+            position = 'bottomright')
+```
+
+Para esse grafico, vejo Nonoai novamente com um valor muito alto. Dessa vez, para o indice de moran.
+  
+Isso indica que esse municipio possui uma autocorrelacao espacial com seus vizinhos imediatos muito forte.
+
+```{r}
+### LISA
+dados$Sgini <- scale(dados$prop_obitos)
+dados$lag <- lag.listw(ww, dados$prop_obitos)
+dados$pval <- dados$significancia_moran
+  
+  
+breaks <- seq(1, 5, 1)
+labels <- c("High-High", "Low-Low", "High-Low", "Low-High", "Not Signif.")
+np <- findInterval(dados$quad_sig, breaks)
+colors <- c("red", "blue", "lightpink", "skyblue2", "white")
+  
+dados$quad_sig <- ifelse(dados$Sgini >= 0 & dados$lag >= 0 & dados$pval <= 0.05, 1, 
+                        ifelse(dados$Sgini <= 0 & dados$lag <= 0 & dados$pval <= 0.05, 2, 
+                               ifelse(dados$Sgini >= 0 & dados$lag <= 0 & dados$pval <= 0.05, 3, 
+                                      ifelse(dados$Sgini >= 0 & dados$lag <= 0 & dados$pval <= 0.05, 4, 5))))
+
+dados$quad_sig <- factor(
+    dados$quad_sig,
+    levels = c(1, 2, 3, 4, 5),
+    labels = c(
+      "Alto-Alto",
+      "Baixo-Baixo",
+      "Alto-Baixo",
+      "Baixo-Alto",
+      "Nao Significativo"
+    )
+  )
+  
+pal <-
+    colorFactor(
+      palette = c("red", "blue", "purple", "orange", "gray"),
+      domain = dados$quad_sig
+    )
+  y = dados$quad_sig
+  
+  leaflet(dados) %>%
+    addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+    addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+    addPolygons(
+      fillColor = ~ pal(dados$quad_sig),
+      weight = 1.5,
+      opacity = 1,
+      fillOpacity = 0.7,
+      color = "gray",
+      highlight = highlightOptions(
+        weight = 5,
+        color = "#666",
+        fillOpacity = 0.7,
+        bringToFront = TRUE
+      ),
+      label = sprintf("%s - %s", dados$NM_MUN, dados$quad_sig),
+      labelOptions = labelOptions(
+        style = list("font-weight" = "normal", padding = "6px 11px"),
+        textsize = "10px",
+        direction = "auto"
+      )
+    ) %>%
+    addLegend(
+      pal = pal,
+      values = ~ dados$quad_sig,
+      opacity = 0.7,
+      title = NULL,
+      labFormat = labelFormat(digits = 5),
+      position = "bottomright"
+    ) %>%
+    addScaleBar(position = 'bottomleft')
+
+```
+
+Para esse ultimo grafico, visualizo aquelas regioes que possuem uma taxa alta de homicidios e possuem uma autocorrelacao alta.

@@ -1,0 +1,768 @@
+---
+title: "Estatística espacial - Dados de Área"
+subtitle: 'Lista de Exercícios 8'
+author: "Antônio, Giordano, João Lucas, Kevin, Leonardo e Letícia"
+date: "2023"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(sf)
+library(dplyr)
+library(plotly)
+library(leaflet)
+library(sp)
+library(INLA)
+library(spdep)
+library(knitr)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	error = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+## Questão 1 {-}
+
+Escolha uma base de dados de área e faça as seguintes análises:
+
+### a) Comente sobre a escolha da base e qual a variável de interesse. {-}
+
+O banco de dados escolhido refere-se ao número de homicídios em 2019 para os municípios do estado do Rio Grande do Sul. O banco de dados foi extraído do site do Instituto de Pesquisa Econômia Aplicada, [Atlas da Violência](https://www.ipea.gov.br/atlasviolencia/filtros-series).
+
+```{r, results='hide'}
+# Dados iniciais
+homicidios <- read.csv2("bancos iniciais/homicidios.csv", 
+                        encoding = "UTF-8") %>% 
+  filter(periodo == 2019) %>% select(1, 2, "num" = valor)
+taxa <- read.csv2("bancos iniciais/taxa-homicidios.csv", 
+                  encoding = "UTF-8") %>% 
+  filter(periodo == 2019) %>%  select(1, 2, "taxa" = valor)
+codigos_ibge <- read.csv2("bancos iniciais/codigos_ibge.csv", 
+                          encoding = "UTF-8") %>%
+  mutate("cod" = codigo) %>% select(-codigo)
+populacao <- read_xlsx("bancos iniciais/populacao_rs2019.xlsx")
+indices <- read.csv("bancos iniciais/banco_idh.csv", encoding = "UTF-8", header = F)
+colnames(indices) = indices[1,]; indices = indices[-1,]
+indices <- indices[, c(4, 5, 234)]; colnames(indices) = c("cod2", "nome", "IDHM")
+
+valores <- full_join(homicidios, taxa, by = c("cod", "nome")) %>%
+  filter(cod %in% codigos_ibge$cod) %>% unique() %>%
+  full_join(populacao, by = c("nome" = "municipio")) %>%
+  mutate(taxa = (num/populacao)*100000,
+         cod = as.character(cod)) %>%
+  mutate(cod = ifelse(nome == "Coronel Barros", "4305871", cod))
+
+valores$cod2 = substr(valores$cod, 1, 6)
+valores <- full_join(valores, indices, by = "cod2") %>% 
+  mutate("IDHM" = as.numeric(IDHM)) %>%
+  select(cod, nome.x, num, taxa, populacao, IDHM)
+
+shp <- st_read("shapefile/RS_Municipios_2019.shp") %>%
+  filter(CD_MUN %in% codigos_ibge$cod)
+
+dados <- left_join(shp, valores, by = c("CD_MUN" = "cod")) %>%
+  select(CD_MUN, NM_MUN, "homicidios" = num, taxa, populacao, IDHM, geometry)
+```
+
+A nossa variável de interesse para este caso é o número de homicídios por município no estado do Rio Grande do Sul. Abaixo, temos um mapa com o valor da variável de interesse em cada cidade.
+
+```{r}
+intervalos <- classInt::classIntervals(var = dados$homicidios, n = 9, 
+                                       style = "fisher")
+
+pal <- colorBin("Reds", domain = dados$homicidios, bins = intervalos[['brks']])
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addPolygons(fillColor = ~pal(homicidios), 
+              weight = 1.5,
+              opacity = 0.7,
+              fillOpacity = 0.7,
+              color = "gray",
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                fillOpacity = 0.7,
+                bringToFront = TRUE),
+              label = sprintf("Município: %s - Homicídios: %s", 
+                              dados$NM_MUN, dados$homicidios),
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "6px 11px"),
+                textsize = "10px",
+                direction = "auto")) %>%
+  addLegend(pal = pal, 
+            values = ~dados$homicidios, 
+            opacity = 0.7, 
+            title = "Total de Homícidios por Munícipio",
+            labFormat = labelFormat(digits = 3),
+            position = "bottomright")
+```
+
+### b) Calcule a proporção da variável de interesse. {-}
+
+Para o cálculo da proporção da variável, foi utilizado o banco de dados disponibilizado pela professora com o número de habitantes por município do RS. Então, também foi feito um mapa com esta proporção calculada.
+
+```{r}
+dados$taxa <- dados$homicidios/dados$populacao
+dados$taxa100000 <- dados$taxa * 100000
+
+head(dados, 10)
+```
+
+Vale destacar que para o mapa, foi utilizada a taxa por 100 mil habitantes para melhor entendimento. Podemos ressaltar também que houve uma diferença em relação ao primeiro mapa, que continha apenas o número de homicídios por cidade.
+
+### c) Faça um mapa da taxa calcule a SMR e faça um gráfico de dispersão considerando essas taxas e o tamanho da população. {-}
+
+Mapa da taxa será representado a seguir:
+```{r}
+intervalos <- classInt::classIntervals(var = dados$taxa100000, n = 9, 
+                                       style = "fisher")
+pal <- colorBin("Reds", domain = dados$taxa100000, bins = intervalos[['brks']])
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addPolygons(fillColor = ~pal(taxa100000), 
+              weight = 1.5,
+              opacity = 0.7,
+              fillOpacity = 0.7,
+              color = "gray",
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                fillOpacity = 0.7,
+                bringToFront = TRUE),
+              label = sprintf("Município: %s - Proporção: %s", 
+                              dados$NM_MUN, round(dados$taxa100000, 2)),
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "6px 11px"),
+                textsize = "10px",
+                direction = "auto")) %>%
+  addLegend(pal = pal, 
+            values = ~(dados$taxa100000), 
+            opacity = 0.7, 
+            title = "Taxa de Homícidios por 100.000 habitantes",
+            labFormat = labelFormat(digits = 3),
+            position = "bottomright")
+```
+
+Mapa do tamanho populacional por Munícipio:
+```{r}
+intervalos <- classInt::classIntervals(var = dados$populacao, n = 9, 
+                                       style = "fisher")
+
+pal <- colorBin("Reds", domain = dados$populacao, bins = intervalos[['brks']])
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addPolygons(fillColor = ~pal(dados$populacao), 
+              weight = 1.5,
+              opacity = 0.7,
+              fillOpacity = 0.7,
+              color = "gray",
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                fillOpacity = 0.7,
+                bringToFront = TRUE),
+              label = sprintf("%s - População: %s", 
+                              dados$NM_MUN, dados$populacao),
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "6px 11px"),
+                textsize = "10px",
+                direction = "auto")) %>%
+  addLegend(pal = pal, 
+            values = ~dados$populacao, 
+            opacity = 0.7, 
+            title = "Tamanho populacional por Munícipio",
+            labFormat = labelFormat(digits = 3),
+            position = "bottomright")
+
+```
+
+
+Taxa global:
+
+```{r}
+r <- sum(dados$homicidios, na.rm = TRUE)/sum(dados$populacao, na.rm = TRUE)
+r * 100000
+```
+
+Homicídios esperados:
+```{r}
+dados$esperados <- r*dados$populacao
+```
+
+Taxa de mortalidade padronizada (SMR):
+```{r}
+dados$tmp <- dados$homicidios/dados$esperados
+kable(head(cbind(dados$NM_MUN, dados$homicidios, 
+                 round(dados$esperados,3), round(dados$tmp,3)), 10),
+      col.names = c('Município','Homícidios', 'Homicídios esperados','TMP'), 
+      format = "pandoc")
+```
+
+Mapa de taxa de mortalidade padronizada:
+```{r}
+pal <- colorNumeric("Reds", domain = dados$tmp)
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addPolygons(fillColor = ~pal(dados$tmp), 
+              weight = 1.5,
+              opacity = 0.7,
+              fillOpacity = 0.7,
+              color = "gray",
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                fillOpacity = 0.7,
+                bringToFront = TRUE),
+              label = sprintf("%s - SMR: %s - hom/pop = %s/%s", 
+                              dados$NM_MUN, round(dados$tmp,3), 
+                              dados$homicidios, dados$populacao),
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "6px 11px"),
+                textsize = "10px",
+                direction = "auto")) %>%
+  addLegend(pal = pal, 
+            values = ~dados$tmp, 
+            opacity = 0.7, 
+            title = "SMR por Munícipio",
+            labFormat = labelFormat(digits = 3),
+            position = "bottomright")
+```
+
+Mudando a escala:
+
+```{r}
+intervalos <- classInt::classIntervals(var = dados$tmp, n = 9, style = "fisher")
+
+pal2 <- colorBin(palette="Reds", domain = dados$tmp, bins = intervalos[['brks']])
+
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addPolygons(fillColor = ~pal2(dados$tmp), 
+              weight = 1.5,
+              opacity = 0.7,
+              fillOpacity = 0.7,
+              color = "gray",
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                fillOpacity = 0.7,
+                bringToFront = TRUE),
+              label = sprintf("%s - SMR: %s - hom/pop = %s/%s", 
+                              dados$NM_MUN, round(dados$tmp,3), dados$homicidios, dados$populacao),
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "6px 11px"),
+                textsize = "10px",
+                direction = "auto")) %>%
+  addLegend(pal = pal2, 
+            values = ~dados$tmp, 
+            opacity = 0.7, 
+            title = "SMR por Munícipio",
+            labFormat = labelFormat(digits = 3),
+            position = "bottomright")
+```
+
+Mapa da variância estimada da Taxa de Mortalidade Padronizada:
+
+```{r}
+dados$var <- dados$tmp/dados$esperados
+
+intervalos <- c(0,.1,.2,.5,1,1.5,2.5,3.5,4.5,10,22)
+
+pal2 <- colorBin(palette="Reds", domain = dados$var, bins = intervalos, 
+                 reverse = F)
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+      addPolygons(fillColor = ~pal2(var), 
+                  weight = 1.5,
+                  opacity = 0.7,
+                  fillOpacity = 0.7,
+                  color = "gray",
+                  highlight = highlightOptions(
+                    weight = 5,
+                    color = "#666",
+                    fillOpacity = 0.7,
+                    bringToFront = TRUE),
+                  label = sprintf("%s - Variância TMP: %s - pop: %s", dados$NM_MUN, 
+                                  round(dados$var,4), dados$populacao),
+                  labelOptions = labelOptions(
+                    style = list("font-weight" = "normal", padding = "6px 11px"),
+                    textsize = "10px",
+                    direction = "auto")) %>%
+  addLegend(pal = pal2, values = ~var, opacity = 1, title = "Variância TMP",
+            position = 'bottomright')
+```
+
+
+- Gráfico de dispersão
+
+```{r, warning=FALSE}
+ggplotly(ggplot(dados) +
+  geom_point(aes(x = populacao, y = tmp, label = NM_MUN), alpha = .5) +
+  geom_hline(yintercept = 1)+
+    theme_minimal())
+```
+
+As maiores taxas estão presentes naqueles municípios com populações pequenas.
+
+Densidade das Taxas de Mortalidade Padronizadas:
+```{r}
+ggplot(dados, aes(x = tmp))+
+  geom_density(fill = 'gray90', size = 1)+
+  theme_minimal()
+```
+
+A maioria dos municípios possuem uma TMP próxima de 1.
+
+### d) Calcule o índice de moran para esses dados. {-}
+
+- Índice de Moran global
+
+```{r}
+dados$homicidios[is.na(dados$homicidios)] <- 0
+dados$prop_obitos <- dados$homicidios/dados$populacao
+
+## matriz de vizinhança - rainha ##
+w <- poly2nb(dados$geometry, row.names = dados$NM_MUN)
+ww <- nb2listw(w, style = 'B') #faz a matriz de pesos 0 ou 1
+
+## calculo do teste ##
+i_moran <- moran.mc(dados$prop_obitos, ww, nsim = 9999)
+i_moran
+
+ggplot(data.frame('indice' = i_moran[['res']]), aes(x = indice))+
+  geom_density(size = 1, fill = 'gray90')+
+  geom_vline(xintercept = i_moran$statistic, col = 'red')+
+  theme_minimal()
+#hist(i_moran[["res"]])
+```
+Observando o p-valor do teste, vejo que ele foi significativo, rejeitando a hipotese nula. Portanto, o indice de moran nao eh 0. Para a sua estimativa, seu valor eh 0.091348. Por ser um valor positivo, isso indica que ha a similaridade no comportamento de areas proximas e vizinhas. Alem disso, por ser um valor baixo, posso concluir que essa similaridade nao eh tao forte.
+
+- Índice de moran local
+
+```{r}
+valores_local_moran <- localmoran(dados$prop_obitos, ww)
+
+
+# valor do índice de moran local
+ggplot(data.frame(valores_local_moran))+
+  geom_histogram(aes(x = Ii), bins = 8, fill = rgb(.5,.7,.8,1))+
+  xlab('moran local')+ylab('frequência')+
+  theme_minimal()
+```
+
+Nesse grafico, observo que muitos valores possuem autocorrelacao espacial proximos de 0. 
+  
+Os que possuem uma autocorrelacao espacial maior que 0 possuem valores semelhantes aos seus vizinhos imediatos. 
+  
+Diferentemente, os que possuem uma autocorrelacao espacial menor que 0 possuem valores diferentes.
+
+```{r}
+# significância
+ggplot(data.frame(valores_local_moran))+
+  geom_histogram(aes(x = valores_local_moran[,5]), bins = 10, fill = rgb(1,.2,.4))+
+  geom_vline(xintercept = 0.05)+
+  xlab('p-valores')+ylab('frequência')+
+  theme_minimal()
+```
+
+Nesse grafico, observo o tamanho dos municipios que possuem um p valor significativo.
+
+```{r}
+
+data.frame(valores_local_moran) %>%
+  select(1,5) %>%
+  top_n(-10)
+
+
+mp <- moran.plot(dados$prop_obitos, ww, labels=as.character(dados$NM_MUN), pch=19)
+```
+
+Observando na tabela, vejo que os municipios que possuem um p valor significativo sao aqueles que possuem a autocorrelacao maior/menor que 0.
+
+No grafico de moran, vejo aqueles municipios que possuem um maior numero de vizinhos, ou seja, uma maior influencia.
+
+
+```{r}
+dados$valor_moran = valores_local_moran[,1] #valores do i de moran local
+dados$significancia_moran = valores_local_moran[,5] #significancia do i de moran local
+
+pal <- colorNumeric("Reds", domain = dados$significancia_moran)
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+      addPolygons(fillColor = ~pal(significancia_moran), 
+                  weight = 1.5,
+                  opacity = 0.7,
+                  fillOpacity = 0.7,
+                  color = "gray",
+                  highlight = highlightOptions(
+                    weight = 5,
+                    color = "#666",
+                    fillOpacity = 0.7,
+                    bringToFront = TRUE),
+                  label = sprintf("%s - p valores moran %s", dados$NM_MUN, round(dados$significancia_moran,3)),
+                  labelOptions = labelOptions(
+                    style = list("font-weight" = "normal", padding = "6px 11px"),
+                    textsize = "10px",
+                    direction = "auto")) %>%
+  addLegend(pal = pal, values = ~significancia_moran, opacity = 1,  
+            title = "p-valores Moran", position = 'bottomright')
+
+```
+
+Observando o grafico, vejo alguns p valores significativos.
+  
+Isso indica que algumas regioes possuem uma forte autocorrelacao, como por exemplo Nonoai.
+  
+Diferentemente de Serio, que possui um p-valor alto, indicando uma autocorrelacao muito baixa.
+  
+Serio possui 3 homicidios com uma populacao muito baixa, podendo ser considerado um outlier.
+
+
+```{r}
+pal <- colorNumeric("Reds", domain = dados$valor_moran)
+
+leaflet(dados) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+      addPolygons(fillColor = ~pal(valor_moran), 
+                  weight = 1.5,
+                  opacity = 0.7,
+                  fillOpacity = 0.7,
+                  color = "gray",
+                  highlight = highlightOptions(
+                    weight = 5,
+                    color = "#666",
+                    fillOpacity = 0.7,
+                    bringToFront = TRUE),
+                  label = sprintf("%s - Moran local: %s", dados$NM_MUN, round(dados$valor_moran,3)),
+                  labelOptions = labelOptions(
+                    style = list("font-weight" = "normal", padding = "6px 11px"),
+                    textsize = "10px",
+                    direction = "auto")) %>%
+  addLegend(pal = pal, values = ~valor_moran, opacity = 1, title = 'Moran local',
+            position = 'bottomright')
+```
+
+Para esse grafico, vejo Nonoai novamente com um valor muito alto. Dessa vez, para o indice de moran.
+  
+Isso indica que esse municipio possui uma autocorrelacao espacial com seus vizinhos imediatos muito forte.
+
+```{r}
+### LISA
+dados$Sgini <- scale(dados$prop_obitos)
+dados$lag <- lag.listw(ww, dados$prop_obitos)
+dados$pval <- dados$significancia_moran
+  
+  
+breaks <- seq(1, 5, 1)
+labels <- c("High-High", "Low-Low", "High-Low", "Low-High", "Not Signif.")
+np <- findInterval(dados$quad_sig, breaks)
+colors <- c("red", "blue", "lightpink", "skyblue2", "white")
+  
+dados$quad_sig <- case_when(dados$Sgini >= 0 & dados$lag >= 0 & dados$pval <= 0.05 ~ 1,
+                            dados$Sgini <= 0 & dados$lag <= 0 & dados$pval <= 0.05 ~ 2,
+                            dados$Sgini >= 0 & dados$lag <= 0 & dados$pval <= 0.05 ~ 3,
+                            dados$Sgini >= 0 & dados$lag <= 0 & dados$pval <= 0.05 ~ 4,
+                            TRUE ~ 5)
+
+dados$quad_sig <- factor(
+    dados$quad_sig,
+    levels = c(1, 2, 3, 4, 5),
+    labels = c(
+      "Alto-Alto",
+      "Baixo-Baixo",
+      "Alto-Baixo",
+      "Baixo-Alto",
+      "Nao Significativo"
+    )
+  )
+  
+pal <-
+    colorFactor(
+      palette = c("red", "blue", "purple", "orange", "gray"),
+      domain = dados$quad_sig
+    )
+  y = dados$quad_sig
+  
+  leaflet(dados) %>%
+    addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+    addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+    addPolygons(
+      fillColor = ~ pal(dados$quad_sig),
+      weight = 1.5,
+      opacity = 1,
+      fillOpacity = 0.7,
+      color = "gray",
+      highlight = highlightOptions(
+        weight = 5,
+        color = "#666",
+        fillOpacity = 0.7,
+        bringToFront = TRUE
+      ),
+      label = sprintf("%s - %s", dados$NM_MUN, dados$quad_sig),
+      labelOptions = labelOptions(
+        style = list("font-weight" = "normal", padding = "6px 11px"),
+        textsize = "10px",
+        direction = "auto"
+      )
+    ) %>%
+    addLegend(
+      pal = pal,
+      values = ~ dados$quad_sig,
+      opacity = 0.7,
+      title = NULL,
+      labFormat = labelFormat(digits = 5),
+      position = "bottomright"
+    ) %>%
+    addScaleBar(position = 'bottomleft')
+
+```
+
+Para esse ultimo grafico, visualizo aquelas regioes que possuem uma taxa alta de homicidios e possuem uma autocorrelacao alta.
+
+### e) Calcule o risco relativo um modelo sem efeito aleatório espacial. {-}  
+
+
+```{r}
+# Mapa
+mapa <- dados$geometry
+mapsf <- st_as_sf(mapa)
+mapsf$homicidios = dados$homicidios
+mapsf$municipio = dados$NM_MUN
+mapsf$populacao = dados$populacao
+mapsf$IDHM = dados$IDHM
+mapsf$vl_esperado <- dados$esperados
+
+# mapsf <- st_as_sf(mapa)
+
+# Modelo sem Efeito Aleatório Espacial
+
+modelo_sem_efeito_aleatorio = inla(homicidios ~ 1 + IDHM,
+                                   data = mapsf,
+                                   family = "poisson",
+                                   E = mapsf$E_i, control.predictor = list(compute = TRUE),
+                                   control.compute = list(dic = TRUE, waic = TRUE))
+
+summary(modelo_sem_efeito_aleatorio)
+```
+
+```{r}
+
+# Efeitos Fixos
+
+resumo_efeitos_fixos= modelo_sem_efeito_aleatorio$summary.fixed
+resumo_efeitos_fixos
+```
+
+```{r}
+modelo_sem_efeito_aleatorio_aux = modelo_sem_efeito_aleatorio$marginals.fixed
+
+b0_modelo_sem_efeito_aleatorio = data.frame(valores=modelo_sem_efeito_aleatorio_aux$`(Intercept)`[,1], probabilidades = modelo_sem_efeito_aleatorio_aux$`(Intercept)`[,2])
+
+b0_plot = ggplot(b0_modelo_sem_efeito_aleatorio, aes(x=valores, y=probabilidades))+
+  #geom_histogram() +
+  geom_line() +
+  geom_vline(xintercept = resumo_efeitos_fixos$mode[1] , col = "red")+ 
+  labs(x = "beta 0", y = "Density")
+b0_plot
+```
+
+```{r}
+head(modelo_sem_efeito_aleatorio$summary.fitted.values)
+mapsf$rr_sem_efeito_aleatorio <- modelo_sem_efeito_aleatorio$summary.fitted[, "mean"]
+
+### PLOTANDO MAPA SEM EFEITOS ALEATORIOS
+pal <- colorBin("Reds", domain = mapsf$rr_sem_efeito_aleatorio)
+
+legenda_reativa <- sprintf(
+  "Município: %s <br/> RR sem efeito aleatório: %s", #escrita estatica
+  mapsf$municipio, round(mapsf$rr_sem_efeito_aleatorio, 3)
+) %>% lapply(htmltools::HTML)
+
+
+leaflet(mapsf) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addScaleBar(position = c("bottomleft"), options = scaleBarOptions(imperial= FALSE)) %>%
+  addPolygons(fillColor = ~pal(rr_sem_efeito_aleatorio), 
+              weight = 1.5,
+              opacity = 0.7,
+              fillOpacity = 0.7,
+              color = "gray",
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                fillOpacity = 0.7,
+                bringToFront = TRUE),
+              label = legenda_reativa) %>%
+  leaflet::addLegend(pal = pal, 
+                     values = ~mapsf$rr_sem_efeito_aleatorio, opacity = 0.7, title = "Risco Relativo",
+                     labFormat = labelFormat(digits = 3),
+                     position = "bottomright")
+```
+
+
+### f) Calcule o risco relativo utilizando o modelo BYM2, utilize alguma covariável. {-}  
+
+$$Y_i|\theta_i  \sim Poisson (E_i\theta_i ), \; \; \; \; i = 1,2,...,n$$
+onde $Y_i$ é o número de óbitos de diabetes do município $i$, $E_i$ representa o número esperado de óbitos do município $i$, neste caso:
+
+$$\log(\theta_i ) = \beta_0 + \beta_1*X_1 +  b_i$$
+onde 
+
+$$\textbf{b} = \frac{1}{\tau_b}(\sqrt{1-\phi} \textbf{v} + \sqrt{\phi}\textbf{u})$$
+$$\textbf{u} ∼ N(0, \frac{\phi}{\tau_b} Q^−)$$ 
+
+é o efeito aleatório espacial (modelo ICAR), $Q$ é a inversa da matriz de covariância e é baseada na matriz de vizinhança $W$ ($W=1$ se as áreas compartilham fronteira e 0 c.c.).
+
+
+
+$$\textbf{v} ∼ N(0, \frac{1-\phi}{\tau_b} I)$$
+
+é o efeito aleatório puro.
+
+$\tau_b$ é o parâmetro de precisão que controla a variância marginal do efeito aleatório.
+
+$\phi$ é o parâmetro de mistura que mede a proporção da variância marginal explicada pelo efeito aleatório estruturado.
+
+```{r}
+regiao <- 1:nrow(mapsf)
+mapsf_sp <- st_zm(mapsf)
+grafo_mapa <- poly2nb(as(mapsf_sp, "Spatial"))
+#grafo_mapa_pensilvania <- nb2mat(grafo_mapa_pensilvania, style = 'B')
+nb2INLA("map.adj", grafo_mapa)
+g <- inla.read.graph(filename = "map.adj")
+formula = homicidios ~ IDHM + f( regiao ,
+                                  model = "bym2",
+                                  graph =g ,
+                                  scale.model = TRUE ,
+                                  constr = TRUE ,
+                                  hyper = list(
+                                    phi = list(
+                                      prior = "pc",
+                                      param = c(0.5 , 2/3) ,
+                                      initial = -3) ,
+                                    prec = list(
+                                      prior = "pc.prec",
+                                      param = c(0.2 /0.31 , 0.01) ,
+                                      initial = 5) ))
+
+result = inla(formula , data = mapsf , family = "poisson", E = vl_esperado ,
+              control.predictor = list( compute = TRUE ),verbose = FALSE,
+              control.compute = list(dic=TRUE, mlik=TRUE,cpo=TRUE, config = T, waic = T),
+              control.inla = list(strategy = "laplace", npoints = 21))
+summary(result)
+result$summary.fixed
+```
+
+```{r}
+dados_mod <- mapsf
+dados_mod$moda <- result$summary.fitted.values[,"mode"] 
+dados_mod$LL <- result$summary.fitted.values[, "0.025quant"]
+dados_mod$UL <- result$summary.fitted.values[, "0.975quant"]
+dados_sf <- st_as_sf(dados_mod)
+
+intervalos <- c(0,.1,.2,.5,1,1.5,2.5)
+pal <- colorBin("Reds", domain = intervalos, bins = 13)
+leaflet(dados_sf) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik) %>%
+  addPolygons(fillColor = ~pal(moda), 
+              weight = 1.5,
+              opacity = 0.7,
+              fillOpacity = 0.7,
+              color = "gray",
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                fillOpacity = 0.7,
+                bringToFront = TRUE),
+              label = sprintf("<strong>%s</strong><br/>RR:%s<br/>Quantis:[%s; %s]<br/>Valor Esperado: %s<br/>Valor Observado: %s",
+                              dados_sf$municipio, round(dados_sf$moda,3), round(dados_sf$LL,3), round(dados_sf$UL,3),round(dados_sf$vl_esperado,3),dados_sf$homicidios) %>%
+                lapply(htmltools::HTML),
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "6px 11px"),
+                textsize = "13px",
+                direction = "bottom")) %>%
+  leaflet::addLegend(pal = pal, values = ~dados_sf$moda, opacity = 0.7, title = "Risco Relativo",
+                     labFormat = labelFormat(digits = 3),
+                     position = "bottomright")
+```
+
+### g) Interprete os parâmetros estimados do modelo da letra _f_. {-}
+
+```{r echo=FALSE}
+estimativas <-  result$summary.fixed[,c(1,6,4,3,5)]
+
+result$summary.fixed %>% 
+  kable(caption = "Tabela dos parâmetros dos efeitos fixos - covariáveis")
+```
+
+O valor da divergência Kullback-Leibler (kld) descreve a diferença entre a aproximação Gaussiana e a Aproximação Simplificada de Laplace (SLA) para as densidades marginais das distribuições \textit{a posteriori}: valores pequenos indicam que a distribuição \textit{a posteriori} é bem aproximada por uma distribuição Normal.
+
+```{r}
+exp(estimativas) %>%
+  kable(caption = "Tabela da função exponencial das estimativas para os parâmetros da regressão")
+
+```
+
+O Risco Relativo aumenta conforme o aumento do IDHM. Por exemplo, a cada aumento de uma  unidade de IDHM, se estima pelo modelo um aumenta de médio de `r exp(estimativas[2,1]) - 1` vezes o risco relativo de um homicídio, e o intercepto não pode ser interpretado pois considera IDHM igual a 0.
+
+Apesar de serem possíveis de serem interpretados os valores não foram significativos pois seu intervalo de credibilidade de 0.95 de probabilidade contêm o 0 (ou o valor 1 caso seja analisado o exponencial de suas estimativas).
+
+#### Distribuição marginal do Hiperparamêtro $\phi$ {-}
+
+O efeito aleatório do modelo é devido à aleatoriedade intrínsica da área quando $\phi=0$ (modelo de efeito aleatório puro). Quando $\phi=1$, então todo o efeito aleatório do modelo é devido à estrutura espacial. 
+
+A distribuição marginal \textit{a posteriori} dos hiperparâmetros (neste caso apenas a precisão do efeito aleatório iid) é armazenada no objeto marginals.hyperpar (que é uma lista):
+
+```{r echo=FALSE}
+marg.variance <- inla.tmarginal(function(x) x,
+result$marginals.hyperpar$`Phi for regiao`)
+
+
+ggplot(data.frame(inla.smarginal(marg.variance)), aes(x, y)) +
+  geom_line() +
+  geom_vline(aes(xintercept = 0 , color = "intercepto"))+ 
+  geom_vline(aes(xintercept = result$summary.hyperpar$'0.025quant'[2] , color = "Intervalo 0.95"))+ 
+  geom_vline(aes(xintercept = result$summary.hyperpar$'0.975quant'[2] , color = "Intervalo 0.95"))+ 
+  scale_color_manual(name = "Y series", values = c("intercepto" = "red","Intervalo 0.95" = "blue"))+
+  xlab("Hiperparâmetro Phi")+
+  theme_bw()
+```
+
+
+```{r}
+result$summary.hyperpar
+```
+
+A mediana a posteriori de $phi$ (phi por região) é igual à `r round(result$summary.hyperpar$mean[2], 4)`, indicando que estima-se que $68.09\%$ da variabilidade dos dados pode ser explicada pelo efeito espacial (IC 0.95 = [`r round(result$summary.hyperpar[2,3],3)*100`, `r round(result$summary.hyperpar[2,5],3)*100`]). 
+
+Além disso, o parâmetro $\tau_b=4.14$ indica a mediana a posteriori do desvio padrão do modelo, que é igual à $1/\sqrt{\tau_b} = 1/\sqrt{4.14}=0.2414827$.
+
+### h) Qual a diferença entre as taxas do modelo bayesiano e a SMR? {-}
+
+Os modelos bayesianos são uma forma mais robusta de calcular taxas em relação a outliers do que a taxa de mortalidade padronizada. Isso porque as taxas do modelo bayesiano são mais suavizadas e permitem compartilhar valores muito altos ou baixos com seus vizinhos. Por outro lado, na taxa de mortalidade padronizada, a variância da estimativa cresce à medida que o tamanho da população diminui, o que faz com que muitos municípios pequenos possuam valores discrepantes.
+
+Assim, a abordagem bayesiana oferece uma maneira mais flexível de modelar os dados, levando em conta a incerteza e permitindo incorporar informações adicionais, como a priori, para melhorar as estimativas.
